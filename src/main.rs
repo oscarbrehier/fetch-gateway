@@ -78,14 +78,22 @@ async fn fetch_handler(headers: HeaderMap, Query(params): Query<FetchParams>) ->
     };
 
     let status = response.status();
+
+    let response_headers = response.headers().clone();
+
     let body = match response.bytes().await {
         Ok(b) => b,
         Err(_) => {
             return (StatusCode::BAD_GATEWAY, "Failed to read response body").into_response();
         }
     };
+    
+    let mut axum_headers = HeaderMap::new();
+    for (key, value) in response_headers.iter() {
+        axum_headers.append(key.clone(), value.clone());
+    }
 
-    (status, body).into_response()
+    (status, axum_headers, body).into_response()
 }
 
 #[tokio::main]
