@@ -10,3 +10,4 @@ reqwest = { version = "0.13.1", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 dotenvy = "0.15"
 anyhow = "1.0.100"
+dashmap = "6.1.0"
