@@ -330,6 +330,10 @@ async fn fetch_handler(
     build_response(final_status, final_headers, body_bytes)
 }
 
+async fn health_check() -> impl IntoResponse {
+    (StatusCode::OK, "OK")
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
@@ -351,6 +355,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/fetch", get(fetch_handler))
+        .route("/health", get(health_check))
         .layer(Extension(state));
 
     let server_addr = env::var("SERVER_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
@@ -358,7 +363,15 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&server_addr).await?;
     println!("Listening on {}", server_addr);
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to install graceful shutdown signal handler");
 }
