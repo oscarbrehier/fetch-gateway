@@ -217,7 +217,13 @@ async fn fetch_handler(
     };
 
     // cache lookup
-    if !no_store {
+    if no_store {
+        if let Some((_, removed)) = state.cache.remove(&params.url) {
+            state
+                .cache_size_bytes
+                .fetch_sub(removed.size, Ordering::Relaxed);
+        }
+    } else {
         if let Some(cached) = state.cache.get(&params.url) {
             if cached.expires_at > Instant::now() {
                 final_status = Some(cached.status);
