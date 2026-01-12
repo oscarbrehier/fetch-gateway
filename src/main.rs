@@ -1,6 +1,8 @@
+use axum::http::{HeaderMap, HeaderName};
 use axum::{Router, extract::Query, response::IntoResponse, routing::get};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::env;
 use std::time::Duration;
 
@@ -19,7 +21,25 @@ fn validate_url(raw: &str) -> Result<reqwest::Url, String> {
     }
 }
 
-async fn fetch_handler(Query(params): Query<FetchParams>) -> impl IntoResponse {
+fn get_whitelisted_headers(headers: &HeaderMap) -> HeaderMap {
+    let whitelisted_headers: HashSet<HeaderName> =
+        ["user-agent", "accept", "x-forwarded-for", "referer"]
+            .iter()
+            .map(|s| s.parse().expect("valid header name"))
+            .collect();
+
+    let mut new_headers = HeaderMap::new();
+
+    for (key, value) in headers.iter() {
+        if whitelisted_headers.contains(key) {
+            new_headers.append(key.clone(), value.clone());
+        }
+    }
+
+    new_headers
+}
+
+async fn fetch_handler(headers: HeaderMap, Query(params): Query<FetchParams>) -> impl IntoResponse {
     let secret = env::var("FETCH_SECRET").expect("FETCH_SECRET must be set");
 
     match params.key {
@@ -34,12 +54,19 @@ async fn fetch_handler(Query(params): Query<FetchParams>) -> impl IntoResponse {
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .unwrap();
+    let client = Client::builder().timeout(Duration::from_secs(10)).build();
 
-    let response = match client.get(url).send().await {
+    let client = match client {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to build reqwest client: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error. Please check logs.").into_response();
+        }
+    };
+
+    let forward_headers = get_whitelisted_headers(&headers);
+
+    let response = match client.get(url).headers(forward_headers).send().await {
         Ok(r) => r,
         Err(e) => {
             return (
@@ -62,14 +89,17 @@ async fn fetch_handler(Query(params): Query<FetchParams>) -> impl IntoResponse {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     let app = Router::new().route("/fetch", get(fetch_handler));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
-        .await
-        .unwrap();
+    let server_addr = env::var("SERVER_ADDR").unwrap_or("127.0.0.1:3000".to_string());
 
-    axum::serve(listener, app).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&server_addr).await?;
+    println!("Listening on {}", server_addr);
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
 }
