@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 const MAX_CACHE_ENTRIES: usize = 10_000;
 const MAX_CACHE_SIZE_BYTES: usize = 100 * 1024 * 1024;
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
-
 struct AppState {
     cache: Arc<DashMap<String, CacheResponse>>,
     client: Client,
@@ -137,27 +136,23 @@ fn evict_if_needed(state: &AppState) {
     if state.cache.len() > MAX_CACHE_ENTRIES || cache_size > MAX_CACHE_SIZE_BYTES {
         // remove expired entries first
         let now = Instant::now();
-        let to_remove: Vec<String> = state
-            .cache
-            .iter()
-            .filter(|entry| entry.expires_at <= now)
-            .map(|entry| entry.key().clone())
-            .collect();
 
-        for key in to_remove {
-            if let Some((_, removed)) = state.cache.remove(&key) {
-                state
-                    .cache_size_bytes
-                    .fetch_sub(removed.size, Ordering::Relaxed);
+        state.cache.retain(|_, v| {
+            if v.expires_at <= now {
+                state.cache_size_bytes.fetch_sub(v.size, Ordering::Relaxed);
+                false
+            } else {
+                true
             }
-        }
+        });
 
-        // remove oldest entries if still over limit
-        if state.cache.len() > MAX_CACHE_ENTRIES {
+        // remove oldest entries if still over limit (saturating sub)
+        let over_limit = state.cache.len().saturating_sub(MAX_CACHE_ENTRIES);
+        if over_limit > 0 {
             let to_remove: Vec<String> = state
                 .cache
                 .iter()
-                .take(state.cache.len() - MAX_CACHE_ENTRIES + 100)
+                .take(over_limit + 100)
                 .map(|entry| entry.key().clone())
                 .collect();
 
@@ -183,6 +178,13 @@ async fn fetch_handler(
         Stale,
         Bypass,
     }
+
+    // custom cache key, fallback to the URL
+    let cache_lookup_key = headers
+        .get("x-cache-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| params.url.clone());
 
     // auth
     let authorized = headers
@@ -218,13 +220,13 @@ async fn fetch_handler(
 
     // cache lookup
     if no_store {
-        if let Some((_, removed)) = state.cache.remove(&params.url) {
+        if let Some((_, removed)) = state.cache.remove(&cache_lookup_key) {
             state
                 .cache_size_bytes
                 .fetch_sub(removed.size, Ordering::Relaxed);
         }
     } else {
-        if let Some(cached) = state.cache.get(&params.url) {
+        if let Some(cached) = state.cache.get(&cache_lookup_key) {
             if cached.expires_at > Instant::now() {
                 final_status = Some(cached.status);
                 final_headers = cached.headers.clone();
@@ -232,7 +234,7 @@ async fn fetch_handler(
                 cache_state = CacheState::Hit;
             } else {
                 drop(cached);
-                state.cache.remove(&params.url);
+                state.cache.remove(&cache_lookup_key);
                 cache_state = CacheState::Stale;
             }
         }
@@ -319,7 +321,7 @@ async fn fetch_handler(
         let size = final_body.len();
 
         state.cache.insert(
-            params.url.clone(),
+            cache_lookup_key.clone(),
             CacheResponse {
                 body: final_body.clone(),
                 status: final_status,
